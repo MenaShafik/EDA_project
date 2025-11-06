@@ -170,3 +170,193 @@ on p.product_key = fs.product_key
 group by p.product_name
 )t
 where rank <=5
+
+/*
+=====================================
+Changing over the time
+=====================================
+*/
+
+SELECT YEAR(order_date) AS order_year,
+SUM(sales_amount) AS sales_amount,
+COUNT(DISTINCT customer_key) AS CUSTOMERS ,
+SUM(quantity) AS QUANTITY
+FROM gold.fact_sales
+WHERE order_date IS NOT NULL
+GROUP BY YEAR(order_date)
+ORDER BY SUM(sales_amount) desc
+
+/*
+=====================================
+Changing over the time
+=====================================
+*/
+ ---calculate the total sales per month
+ select year_date,
+ total,
+ sum(total) over (order by year_date) as run,
+ avg(avg_price) over (order by year_date) as run
+
+ from (
+ select year(order_date) as  year_date,
+ SUM(sales_amount) as total,
+ avg(price) as avg_price
+ FROM gold.fact_sales
+ where order_date is not null
+ group by  year(order_date)
+ )t
+
+ /*
+=====================================
+performance analysis
+=====================================
+*/
+--year over year
+with yearly_product_sales as (
+select YEAR(f.order_date) as order_year,
+p.product_name,
+SUM(f.sales_amount) as total_sales
+from gold.fact_sales as f
+left join gold.dim_products as p
+on f.product_key = p.product_key
+where f.order_date is not null
+group by YEAR(f.order_date),
+p.product_name
+)
+select order_year,
+product_name,
+total_sales,
+AVG(total_sales)over(partition by product_name) AVG_SALES,
+total_sales - AVG(total_sales)over(partition by product_name) as diff_AVG,
+CASE WHEN total_sales - AVG(total_sales)over(partition by product_name) < 0 THEN 'BELOW'
+WHEN total_sales - AVG(total_sales)over(partition by product_name) > 0 THEN 'ABOVE'
+ELSE 'AVERAGE' 
+END AS FLAG
+from yearly_product_sales
+order by product_name,order_year
+
+
+ /*
+=====================================
+PART TO WHOLE analysis
+=====================================
+*/
+
+--which cat contribute the most to overall sales
+with category_sales as (
+select p.category,
+sum(f.sales_amount) as total_sales
+from gold.fact_sales f
+left join gold.dim_products p
+on f.product_key = p.product_key
+group by category
+)
+select 
+category,
+total_sales,
+sum(total_sales)over() overall,
+CONCAT(ROUND(CAST(total_sales as float) / sum(total_sales)over() * 100,2),' %') as percentage 
+from category_sales
+order by total_sales desc
+
+ /*
+=====================================
+Data Segmentstion
+=====================================
+*/
+
+----segment p into cost ranges and count how many p fall into each segment
+
+with seg as (
+select product_key,
+product_name,
+cost,
+case when cost < 100 then 'below 100'
+ when cost between 100 and 500 then '100-500'
+ when cost between 500 and 1000 then '500-1000'
+ else 'above 1000'
+ end as cost_range
+from gold.dim_products
+)
+
+select cost_range,
+COUNT(product_key) as total_p
+from seg
+group by cost_range
+
+----------------------
+with spend as (
+select c.customer_key,
+SUM(f.sales_amount) AS sales_total,
+min(order_date) as first_order,
+min(order_date) as last_order,
+DATEDIFF(month,min(order_date),min(order_date)) as lifespan
+from gold.fact_sales f
+left join gold.dim_customers c
+on f.customer_key = c.customer_key
+group by c.customer_key
+order by DATEDIFF(month,min(order_date),min(order_date)) desc
+)
+select customer_key,
+case when lifespan >= 12 and sales_total > 5000 then 'VIP'
+WHEN lifespan >= 12 and sales_total <= 5000 then 'regular'
+else 'new'
+end customer_seg
+from spend
+
+with base_query as(
+select f.order_number,
+f.product_key,
+f.order_date,
+f.sales_amount,
+f.quantity,
+c.customer_key,c.customer_number,
+c.first_name,
+c.last_name,
+CONCAT(c.first_name,' ',c.last_name) as customer_name,
+c.birthdate,
+DATEDIFF(YEAR,c.birthdate,GETDATE()) as age
+from gold.fact_sales f
+left join gold.dim_customers c
+on f.customer_key = c.customer_key
+where order_date is not null
+),
+customer_aggregation as (
+select 
+customer_key,
+customer_number,
+customer_name,
+age,
+COUNT(sales_amount) as total_sales,
+sum(quantity) as total_quantity,
+count(distinct product_key) as total_products,
+max(order_date) as last_order_date,
+DATEDIFF(month,min(order_date),max(order_date)) as lifespan
+from base_query
+group by customer_key,
+customer_number,
+customer_name,
+age
+)
+select customer_key,
+customer_number,
+customer_name,
+age,
+case when age < 20  then  'under 20 '
+	when age between 20 and 29 then '20-29'
+	when age between 30 and 39 then '30-39'
+	when age between 40 and 49 then '40-49'
+	else '50 and above'
+	end as age_group,
+case when lifespan >= 12 and total_sales > 5000 then 'VIP'
+	 WHEN lifespan >= 12 and total_sales <= 5000 then 'regular'
+else 'new'
+end customer_segtotal_orders,
+total_sales,
+total_quantity,
+total_products,
+DATEDIFF(month,last_order_date,GETDATE()) as recancy,
+
+last_order_date,
+lifespan
+from customer_aggregation
